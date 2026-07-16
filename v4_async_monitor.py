@@ -258,7 +258,7 @@ async def paginate_or_refresh(page, bot_prefix=""):
                 if not is_disabled:
                     console.print(f"[dim]{bot_prefix}All incidents processed. Moving to Next Page...[/dim]")
                     await btn.click()
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(5.0) # Increased to wait for React state to update
                     return True
         except Exception:
             continue
@@ -320,8 +320,14 @@ async def ack_worker(page):
                     if unique_id in acked_ids:
                         continue
                         
-                    # HUGE SPEEDUP: If the dashboard already prints "Acknowledged by", we don't even need to click it!
                     if re.search(r'(?i)acknowledged\s+by', text):
+                        acked_ids.add(unique_id)
+                        continue
+                        
+                    # HUGE SPEEDUP 2: Check age BEFORE clicking!
+                    if age_minutes >= 5:
+                        console.print(f"[Tab 1] [red]Incident is {int(age_minutes)} minutes old (>= 5 mins)! Skipping Acknowledgment.[/red]")
+                        if metric_callback: metric_callback('ignored', 1)
                         acked_ids.add(unique_id)
                         continue
                         
@@ -335,14 +341,10 @@ async def ack_worker(page):
                         is_unacknowledged = True
                             
                     if is_unacknowledged:
-                        if age_minutes >= 5:
-                            console.print(f"[Tab 1] [red]Incident is {int(age_minutes)} minutes old (>= 5 mins)! Skipping Acknowledgment.[/red]")
-                            if metric_callback: metric_callback('ignored', 1)
-                        else:
-                            console.print("[Tab 1] [yellow]Unacknowledged incident detected! Silencing SLA clock...[/yellow]")
-                            await ack_btn.click(force=True)
-                            await asyncio.sleep(0.1) # Instant acknowledgement, no waiting for slow UI banners!
-                            if metric_callback: metric_callback('acked', 1)
+                        console.print("[Tab 1] [yellow]Unacknowledged incident detected! Silencing SLA clock...[/yellow]")
+                        await ack_btn.click(force=True)
+                        await asyncio.sleep(0.1) # Instant acknowledgement, no waiting for slow UI banners!
+                        if metric_callback: metric_callback('acked', 1)
                             
                     # Add to acked_ids
                     acked_ids.add(unique_id)
@@ -486,12 +488,13 @@ async def fill_worker(page):
                             else:
                                 console.print(f"[Tab 2] [dim]AI Prediction failed ({ai_error}). Falling back to Manual Queue.[/dim]")
                                 if log_callback: log_callback(f"[Tab 2] [red]AI Error: {ai_error}[/red]", "fill")
-                                temporarily_skipped_ids.add(unique_id)
-                                await close_side_panel(page)
                                 
                                 if unknown_incident_callback:
                                     unknown_incident_callback(characteristic_key)
                                     
+                                # Asynchronous behavior: skip it for now and continue working in the background!
+                                temporarily_skipped_ids.add(unique_id)
+                                await close_side_panel(page)
                                 continue
                                 
                         # Start filling
@@ -504,6 +507,8 @@ async def fill_worker(page):
                             "rc_responsibility": matched_data["rc_responsibility"]
                         }
                     
+                        fields_successfully_filled = 0
+                    
                         for field_key, field_value in fill_data.items():
                             if field_value and len(str(field_value)) > 2 and "required if" not in str(field_value).lower() and "alllowmediumhigh" not in str(field_value).lower():
                                 try:
@@ -515,60 +520,101 @@ async def fill_worker(page):
                                     }
                                     lbl = lbl_map[field_key]
                                 
-                                    if field_key == "priority":
-                                        label_loc = page.locator(':text("Priority")').locator('visible=true').last
-                                        if not await label_loc.is_visible(timeout=1000):
-                                            continue
+                                    label_loc = page.locator(f'p:text-is("{lbl}"), span:text-is("{lbl}"), label:text-is("{lbl}"), p:has-text("{lbl}"), span:has-text("{lbl}")').locator('visible=true').last
+                                    if not await label_loc.is_visible(timeout=3000):
+                                        console.print(f"  [Tab 2] [red]✗ Label '{lbl}' not found on screen[/red]")
+                                        continue
                                         
-                                        parent_block = label_loc.locator("xpath=..")
-                                        edit_selectors = 'button:has-text("Edit"), a:has-text("Edit"), :text-is("Edit"), button:has(svg.lucide-pen-square)'
+                                    parent_block = label_loc.locator("xpath=..")
+                                    
+                                    # Try to find an Edit button
+                                    edit_selectors = 'button:has-text("Edit"), a:has-text("Edit"), :text-is("Edit"), button:has(svg.lucide-pen-square)'
+                                    edit_btn = parent_block.locator(edit_selectors).locator('visible=true').first
+                                    if not await edit_btn.is_visible(timeout=500):
+                                        parent_block = label_loc.locator("xpath=../..")
                                         edit_btn = parent_block.locator(edit_selectors).locator('visible=true').first
                                         if not await edit_btn.is_visible(timeout=500):
-                                            parent_block = label_loc.locator("xpath=../..")
+                                            parent_block = label_loc.locator("xpath=../../..")
                                             edit_btn = parent_block.locator(edit_selectors).locator('visible=true').first
-                                            if not await edit_btn.is_visible(timeout=500):
-                                                parent_block = label_loc.locator("xpath=../../..")
-                                                edit_btn = parent_block.locator(edit_selectors).locator('visible=true').first
-                                    else:
-                                        parent_block = page.locator(f'div:has(label:has-text("{lbl}"))').last
-                                        if not await parent_block.is_visible(timeout=1000):
-                                            continue
-                                        edit_btn = parent_block.locator('button:has-text("Edit")').first
-                                    
-                                    if await edit_btn.is_visible(timeout=1000):
+                                            
+                                    if await edit_btn.is_visible(timeout=500):
                                         await edit_btn.click(force=True)
                                         await asyncio.sleep(1.0)
                                     else:
-                                        if field_key == "priority":
-                                            await parent_block.click(force=True)
-                                            await asyncio.sleep(1.0)
-                                        else:
-                                            continue
+                                        # Click the block itself (for priority or direct-edit fields)
+                                        await parent_block.click(force=True)
+                                        await asyncio.sleep(1.0)
                                         
-                                    input_loc = parent_block.locator('input:not([type="checkbox"]):not([type="radio"]), textarea, select, .selected-option-class').first
-                                    if await input_loc.is_visible(timeout=2000):
+                                    # Find the input/select/textarea by expanding the parent block upwards!
+                                    input_loc = None
+                                    for level in ["..", "../..", "../../..", "../../../..", "../../../../..", "../../../../../.."]:
+                                        test_loc = label_loc.locator(f"xpath={level}").locator('input:not([type="checkbox"]):not([type="radio"]), textarea, select').locator('visible=true').first
+                                        if await test_loc.is_visible(timeout=200):
+                                            input_loc = test_loc
+                                            break
+                                            
+                                    input_filled = False
+                                    if input_loc:
                                         tag = await input_loc.evaluate("el => el.tagName.toLowerCase()")
-                                        if tag == "select" or "selected-option-class" in await input_loc.evaluate("el => el.className"):
-                                            dropdown_btn = parent_block.locator('button[aria-haspopup="listbox"], button:has(svg.lucide-chevron-down), .lucide-chevron-down').first
-                                            if await dropdown_btn.is_visible(timeout=1000):
-                                                await dropdown_btn.click(force=True)
-                                                await asyncio.sleep(1.0)
-                                                option = page.locator(f'[role="option"]:has-text("{field_value}")').first
-                                                if await option.is_visible(timeout=1000):
-                                                    await option.click(force=True)
-                                                    await asyncio.sleep(0.5)
-                                                else:
-                                                    await page.keyboard.press("Escape")
+                                        if tag == "select":
+                                            # Native select
+                                            try:
+                                                await input_loc.select_option(label=str(field_value), timeout=1000)
+                                                input_filled = True
+                                            except Exception:
+                                                pass
                                         else:
+                                            # Native input or textarea
                                             await input_loc.fill(str(field_value))
-                                            await asyncio.sleep(0.5)
+                                            input_filled = True
+                                        await asyncio.sleep(0.5)
                                         
-                                        save_btn = parent_block.locator('button:has-text("Save"), :text-is("Save")').first
-                                        if await save_btn.is_visible(timeout=1500):
-                                            await save_btn.click(force=True)
-                                            await asyncio.sleep(1.5)
+                                    if not input_filled:
+                                        # Maybe it's a custom React dropdown.
+                                        # We might need to click a dropdown trigger if "Edit" just revealed a closed dropdown box
+                                        for level in ["..", "../..", "../../..", "../../../.."]:
+                                            trigger = label_loc.locator(f"xpath={level}").locator('button[aria-haspopup], div[class*="control"], .lucide-chevron-down').locator('visible=true').first
+                                            if await trigger.is_visible(timeout=200):
+                                                await trigger.click(force=True)
+                                                await asyncio.sleep(0.5)
+                                                break
+                                                
+                                        option_selectors = f'[role="option"]:has-text("{field_value}"), option:has-text("{field_value}"), li:has-text("{field_value}"), div[class*="option"]:has-text("{field_value}")'
+                                        option = page.locator(option_selectors).locator('visible=true').first
+                                        if await option.is_visible(timeout=1500):
+                                            await option.click(force=True)
+                                            await asyncio.sleep(0.5)
+                                            input_filled = True
+                                            
+                                    if not input_filled:
+                                        console.print(f"  [Tab 2] [red]✗ Input/Option not visible for {lbl}[/red]")
+                                        continue
+                                        
+                                    fields_successfully_filled += 1
+                                        
+                                    # Find and Click Save Button
+                                    save_btn = None
+                                    for level in ["..", "../..", "../../..", "../../../..", "../../../../.."]:
+                                        test_save = label_loc.locator(f"xpath={level}").locator('button:has-text("Save"), :text-is("Save"), button.bg-blue-600').locator('visible=true').first
+                                        if await test_save.is_visible(timeout=200):
+                                            save_btn = test_save
+                                            break
+                                            
+                                    if save_btn:
+                                        await save_btn.click(force=True)
+                                        await asyncio.sleep(1.5)
+                                    else:
+                                        console.print(f"  [Tab 2] [dim]Save button not found for {lbl} (assuming auto-save)[/dim]")
+                                            
                                 except Exception as e:
+                                    console.print(f"  [Tab 2] [red]Error on {field_key}: {str(e)[:100]}[/red]")
                                     pass
+                                
+                        if fields_successfully_filled == 0:
+                            console.print("[Tab 2] [red]Failed to fill ANY fields! Aborting Finish Update.[/red]")
+                            temporarily_skipped_ids.add(unique_id)
+                            await close_side_panel(page)
+                            continue
                                 
                         # Finish Update
                         finish_btn = page.locator('button:has-text("Finish Update")').first
