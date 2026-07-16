@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Siren | Incident Bot Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="glass-panel">
+            <div class="logo">
+                <i class="fa-solid fa-robot pulse-icon"></i>
+                <h1>Siren Bot</h1>
+            </div>
+        </header>
+
+        <div class="main-grid">
+            <!-- Left Column: Controls & Metrics -->
+            <div class="left-col">
+                <section class="glass-panel controls-card">
+                    <h2><i class="fa-solid fa-volume-xmark"></i> Siren Silencer</h2>
+                    <div class="btn-group">
+                        <button id="btn-start-ack" class="btn primary"><i class="fa-solid fa-play"></i> Start Ack Bot</button>
+                        <button id="btn-stop-ack" class="btn danger" disabled><i class="fa-solid fa-stop"></i> Stop</button>
+                    </div>
+                    <div style="margin-top: 10px; font-size: 0.9em;">
+                        Status: <span id="status-ack-text" style="color: #9ca3af;">Stopped</span>
+                    </div>
+                </section>
+
+                <section class="glass-panel controls-card">
+                    <h2><i class="fa-solid fa-pen-to-square"></i> Background Filler</h2>
+                    <div class="btn-group">
+                        <button id="btn-start-fill" class="btn primary"><i class="fa-solid fa-play"></i> Start Fill Bot</button>
+                        <button id="btn-stop-fill" class="btn danger" disabled><i class="fa-solid fa-stop"></i> Stop</button>
+                    </div>
+                    <div style="margin-top: 10px; font-size: 0.9em;">
+                        Status: <span id="status-fill-text" style="color: #9ca3af;">Stopped</span>
+                    </div>
+                </section>
+
+                <section class="glass-panel metrics-card">
+                    <h2>Metrics</h2>
+                    <div class="metric-grid">
+                        <div class="metric-box">
+                            <i class="fa-solid fa-bolt" style="color: #f59e0b;"></i>
+                            <div class="metric-info">
+                                <h3>Auto-Acknowledged</h3>
+                                <p id="metric-acked">0</p>
+                            </div>
+                        </div>
+                        <div class="metric-box">
+                            <i class="fa-solid fa-check-double" style="color: #10b981;"></i>
+                            <div class="metric-info">
+                                <h3>Auto-Filled</h3>
+                                <p id="metric-filled">0</p>
+                            </div>
+                        </div>
+                        <div class="metric-box">
+                            <i class="fa-solid fa-user-check" style="color: #6366f1;"></i>
+                            <div class="metric-info">
+                                <h3>Manual Fills</h3>
+                                <p id="metric-manual">0</p>
+                            </div>
+                        </div>
+                        <div class="metric-box">
+                            <i class="fa-solid fa-robot" style="color: #8b5cf6;"></i>
+                            <div class="metric-info">
+                                <h3>AI Auto-Filled</h3>
+                                <p id="metric-ai">0</p>
+                            </div>
+                        </div>
+                        <div class="metric-box">
+                            <i class="fa-solid fa-ban" style="color: #ef4444;"></i>
+                            <div class="metric-info">
+                                <h3>Stale/Ignored</h3>
+                                <p id="metric-ignored">0</p>
+                            </div>
+                        </div>
+                        <div class="metric-box">
+                            <i class="fa-solid fa-brain"></i>
+                            <div class="metric-info">
+                                <h3>Known Incidents</h3>
+                                <p id="metric-memory">0</p>
+                            </div>
+                        </div>
+                        <div class="metric-box">
+                            <i class="fa-solid fa-clock"></i>
+                            <div class="metric-info">
+                                <h3>Uptime</h3>
+                                <p id="metric-uptime">0m</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Right Column: Live Terminals -->
+            <div class="right-col" style="display: flex; gap: 20px;">
+                <section class="glass-panel terminal-card" style="flex: 1;">
+                    <div class="terminal-header">
+                        <h2><i class="fa-solid fa-terminal"></i> Feed - Acknowledger</h2>
+                        <button id="btn-clear-ack" class="icon-btn"><i class="fa-solid fa-trash"></i></button>
+                    </div>
+                    <div class="terminal-body" id="terminal-body-ack">
+                        <!-- Logs injected here -->
+                    </div>
+                </section>
+
+                <section class="glass-panel terminal-card" style="flex: 1;">
+                    <div class="terminal-header">
+                        <h2><i class="fa-solid fa-terminal"></i> Feed - Filler</h2>
+                        <button id="btn-clear-fill" class="icon-btn"><i class="fa-solid fa-trash"></i></button>
+                    </div>
+                    <div class="terminal-body" id="terminal-body-fill">
+                        <!-- Logs injected here -->
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <!-- Bottom Row: Memory Manager -->
+        <section class="glass-panel memory-card">
+            <div class="memory-header">
+                <h2><i class="fa-solid fa-database"></i> Memory Manager</h2>
+                <div style="display: flex; gap: 10px;">
+                    <button id="btn-api-key" class="btn text-btn"><i class="fa-solid fa-key"></i> OpenRouter AI Key</button>
+                    <button id="btn-add-memory" class="btn secondary"><i class="fa-solid fa-plus"></i> Add Mapping</button>
+                </div>
+            </div>
+            <div class="table-container">
+                <table id="memory-table">
+                    <thead>
+                        <tr>
+                            <th>Incident Key</th>
+                            <th>Priority</th>
+                            <th>Description</th>
+                            <th>Category</th>
+                            <th>Responsibility</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="memory-tbody">
+                        <!-- Rows injected here -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <!-- Modal for Adding/Editing Memory -->
+    <div id="memory-modal" class="modal">
+        <div class="modal-content glass-panel">
+            <h2 id="modal-title">Add Incident Mapping</h2>
+            <form id="memory-form">
+                <div class="form-group">
+                    <label>Incident Key (e.g. altpro-latency)</label>
+                    <input type="text" id="mem-key" required>
+                </div>
+                <div class="form-group">
+                    <label>Priority</label>
+                    <select id="mem-priority">
+                        <option value="Low">Low</option>
+                        <option value="Medium">Medium</option>
+                        <option value="High">High</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Root Cause Category</label>
+                    <input type="text" id="mem-category" required>
+                </div>
+                <div class="form-group">
+                    <label>Root Cause Responsibility</label>
+                    <input type="text" id="mem-resp" required>
+                </div>
+                <div class="form-group">
+                    <label>Root Cause Description</label>
+                    <textarea id="mem-desc" rows="3" required></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" id="btn-cancel-modal" class="btn text-btn">Cancel</button>
+                    <button type="submit" class="btn primary">Save Mapping</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal for API Key -->
+    <div id="api-modal" class="modal">
+        <div class="modal-content glass-panel">
+            <h2>OpenRouter API Settings</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 20px; font-size: 0.9em;">
+                Enter your OpenRouter API key to enable the AI Agent. If left blank, the bot will fall back to the manual queue popup.
+            </p>
+            <form id="api-form">
+                <div class="form-group">
+                    <label>API Key (sk-or-v1-...)</label>
+                    <input type="password" id="api-key-input" placeholder="sk-or-v1-...">
+                </div>
+                <div class="modal-actions">
+                    <button type="button" id="btn-cancel-api" class="btn text-btn">Cancel</button>
+                    <button type="submit" class="btn primary">Save Key</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

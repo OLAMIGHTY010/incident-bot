@@ -1,0 +1,28 @@
+# Environments
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Data / Images
+incident_memory.json
+*.png
+*.jpg
+*.jpeg
+*.html
+!index.html
+!debug_dom.html
+row_debug.html
+
+# IDEs
+.vscode/
+.idea/
+
+# Custom Scripts
+fix*.py
+test*.py
+gen*.py
+hardcode*.py
