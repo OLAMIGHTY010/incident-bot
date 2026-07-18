@@ -93,12 +93,16 @@ def run_bot_ack_thread():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(v4_async_monitor.main_ack())
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(tb)
-        dashboard_logger(f"[red]Fatal Acknowledger Crash:\n{tb}[/red]", "ack")
+        while True:
+            try:
+                loop.run_until_complete(v4_async_monitor.main_ack())
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                print(tb)
+                dashboard_logger(f"[red]Acknowledger Crashed. Auto-restarting in 5s...\n{e}[/red]", "ack")
+                import time
+                time.sleep(5)
     finally:
         if uvicorn_loop and not uvicorn_loop.is_closed():
             asyncio.run_coroutine_threadsafe(
@@ -114,12 +118,16 @@ def run_bot_fill_thread():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(v4_async_monitor.main_fill())
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(tb)
-        dashboard_logger(f"[red]Fatal Filler Crash:\n{tb}[/red]", "fill")
+        while True:
+            try:
+                loop.run_until_complete(v4_async_monitor.main_fill())
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                print(tb)
+                dashboard_logger(f"[red]Filler Crashed. Auto-restarting in 5s...\n{e}[/red]", "fill")
+                import time
+                time.sleep(5)
     finally:
         if uvicorn_loop and not uvicorn_loop.is_closed():
             asyncio.run_coroutine_threadsafe(

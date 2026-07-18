@@ -32,15 +32,34 @@ async def predict_incident_fields(incident_key: str, memory_dict: dict) -> dict:
         if cat and cat != "-": known_categories.add(cat)
         if resp and resp != "-": known_responsibilities.add(resp)
         
+    custom_rules = ""
+    try:
+        rules_path = os.path.join(os.path.dirname(__file__), "ai_rules.txt")
+        if os.path.exists(rules_path):
+            with open(rules_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if content and not content.startswith("#") or len(content.split('\n')) > 5:
+                    # Filter out purely commented files
+                    real_lines = [line for line in content.split('\n') if not line.strip().startswith('#')]
+                    if real_lines:
+                        custom_rules = "\n\nUser-Defined Rules:\n" + "\n".join(real_lines)
+    except Exception:
+        pass
+        
     system_prompt = f"""You are an autonomous IT Incident Management AI.
 Your job is to read an incident key/name and predict the most appropriate Root Cause Description, Category, Responsibility, and Priority.
 
 Rules:
 1. Always return a raw JSON object containing exactly these keys: `priority`, `rc_category`, `rc_responsibility`, `rc_description`. Do NOT return any markdown wrapping.
 2. `priority` must be exactly one of: "Low", "Medium", "High", "Critical". (Default to Low if unsure).
-3. Choose the most logical `rc_category` from this known list: {list(known_categories)}. If none fit perfectly, invent a highly professional IT category.
-4. Choose the most logical `rc_responsibility` from this known list: {list(known_responsibilities)}. If none fit perfectly, invent a highly professional IT responsibility (e.g. "Network Team", "DevOps", "Database Admin").
-5. As an SRE, your `rc_description` MUST be a highly concise technical summary, strictly limited to 1-2 lines max. (E.g. if the name is 'document-api-timeout', the description could be 'Intermittent timeouts observed on the document API service.')
+3. If you do not know the category/responsibility, pick the most logical guess from the lists below.
+4. Try to keep `rc_description` under 100 characters.
+
+Known Categories:
+{list(known_categories)}
+
+Known Responsibilities:
+{list(known_responsibilities)}{custom_rules}
 """
 
     user_prompt = f"Please analyze and predict values for the incident key: '{incident_key}'"

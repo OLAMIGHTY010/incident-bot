@@ -1,0 +1,9 @@
+# Custom AI Rules for Auto-Filling Incidents
+# ----------------------------------------------------
+# You can write plain-English rules here to tell the OpenRouter AI exactly how to categorize certain incidents.
+# If this file is empty, the AI will just guess based on past incidents.
+#
+# Examples:
+# - "If the incident mentions 'database', always set Responsibility to 'DBA Team'."
+# - "If the incident is about 'camsv3', set Priority to 'High'."
+# - "If the incident is a timeout, the Root Cause Category should be 'Network'."

@@ -4,8 +4,14 @@ import os
 import re
 import sys
 import time
+import csv
 from datetime import datetime
 from pathlib import Path
+
+try:
+    from plyer import notification
+except ImportError:
+    notification = None
 
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from rich.console import Console
@@ -20,7 +26,17 @@ def default_logger(msg, bot_type="both"):
     print(f"[{bot_type.upper()}] {msg}")
 
 def default_metric(key, val):
-    pass
+    auto_save_metrics_csv(key, val)
+
+def auto_save_metrics_csv(key, val):
+    os.makedirs("reports", exist_ok=True)
+    file_path = "reports/metrics.csv"
+    file_exists = os.path.isfile(file_path)
+    with open(file_path, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp", "key", "value"])
+        writer.writerow([datetime.now().isoformat(), key, val])
 
 # Global callbacks for Dashboard Integration
 log_callback = default_logger
@@ -61,6 +77,7 @@ console.print = _intercept_print
 # ── Config ─────────────────────────────────────────────────────────────────
 BASE_URL = "https://sterlingobservability-sterlingbankng.msappproxy.net/one-monitor-v2/incidents"
 MEMORY_FILE = Path("incident_memory.json")
+ACK_TRACKER_FILE = Path("ack_tracker.json")
 CHROME_PORT = 9222
 
 # ── Shared State & Locks ───────────────────────────────────────────────────
@@ -88,6 +105,8 @@ async def async_input_with_timeout(prompt: str, timeout: int = 15) -> str:
         result = await asyncio.wait_for(task, timeout=timeout)
         return result.strip()
     except asyncio.TimeoutError:
+        if notification:
+            notification.notify(title="Manual Action Required", message=prompt, timeout=10)
         sys.stdout.write('\n')
         raise
 
@@ -147,14 +166,8 @@ async def close_side_panel(page):
         try:
             stuck_backdrop = page.locator('.fixed.inset-0.bg-black, .bg-black.bg-opacity-50').locator('visible=true').last
             if await stuck_backdrop.is_visible(timeout=500):
-                console.print("[yellow]⚠ Modal stubbornly refused to close! Force reloading the page...[/yellow]")
-                await page.reload(wait_until="domcontentloaded")
-                try:
-                    await page.locator('.bg-black.bg-opacity-50').locator('visible=true').last.wait_for(state="hidden", timeout=10000)
-                except Exception:
-                    pass
-                await asyncio.sleep(5)
-                return True
+                # We intentionally do nothing here. The dashboard's CSS often leaves a ghost backdrop that isn't actually blocking anything.
+                pass
         except Exception:
             pass
             
@@ -238,6 +251,34 @@ async def wait_for_success(page, action_name, tab_prefix=""):
         console.print(f"  {tab_prefix}[yellow]⚠ No success banner seen for {action_name}[/yellow]")
         return False
 
+async def goto_page(page, target_page, bot_prefix="[Tab 2] "):
+    """Navigate to a specific page number by clicking Next repeatedly."""
+    if target_page <= 1:
+        return
+    console.print(f"{bot_prefix}[dim]Returning to page {target_page}...[/dim]")
+    for _ in range(target_page - 1):
+        next_selectors = [
+            'button[aria-label*="Next"]', 'button[aria-label*="next"]',
+            'button[title*="Next"]', 'button:has-text("Next")',
+            'a:has-text("Next")', '.lucide-chevron-right', 'button.next-page'
+        ]
+        clicked = False
+        for sel in next_selectors:
+            try:
+                btn = page.locator(sel).locator('visible=true').first
+                if await btn.is_visible(timeout=300):
+                    is_disabled = await btn.evaluate("el => el.disabled || el.getAttribute('aria-disabled') === 'true'")
+                    if not is_disabled:
+                        await btn.click()
+                        await asyncio.sleep(2.0)
+                        clicked = True
+                        break
+            except Exception:
+                continue
+        if not clicked:
+            break  # Can't go further — stop
+
+
 async def paginate_or_refresh(page, bot_prefix=""):
     """Tries to click the 'Next' page button. If it can't (last page), it reloads to reset to Page 1."""
     next_selectors = [
@@ -256,7 +297,10 @@ async def paginate_or_refresh(page, bot_prefix=""):
             if await btn.is_visible(timeout=200):
                 is_disabled = await btn.evaluate("el => el.disabled || el.classList.contains('disabled') || el.getAttribute('aria-disabled') === 'true'")
                 if not is_disabled:
-                    console.print(f"[dim]{bot_prefix}All incidents processed. Moving to Next Page...[/dim]")
+                    if bot_prefix == "[Tab 2] ":
+                        console.print(f"[dim]{bot_prefix}Fast-forwarding to Next Page...[/dim]")
+                    else:
+                        console.print(f"[dim]{bot_prefix}All incidents processed. Moving to Next Page...[/dim]")
                     await btn.click()
                     await asyncio.sleep(5.0) # Increased to wait for React state to update
                     return True
@@ -279,114 +323,243 @@ async def paginate_or_refresh(page, bot_prefix=""):
         
     return False
 
+
+def parse_incident_age(text, first_word):
+    """Parse the incident age in minutes from the row text.
+    Handles two formats:
+    1. Row text contains 'YYYY-MM-DD HH:MM:SS'
+    2. Incident ID starts with 'YYYYMMDDHHMM-' (e.g. '202607181131-altpro-...')
+    Returns (unique_id, age_minutes, incident_time_str)
+    """
+    unique_id = first_word
+    age_minutes = 0
+    incident_time_str = None
+    
+    # Try format 1: YYYY-MM-DD HH:MM:SS in the row text
+    match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', text)
+    if match:
+        incident_time_str = match.group(1)
+        try:
+            incident_time = datetime.strptime(incident_time_str, "%Y-%m-%d %H:%M:%S")
+            age_minutes = abs((datetime.now() - incident_time).total_seconds() / 60)
+        except Exception:
+            age_minutes = 0
+    else:
+        # Try format 2: YYYYMMDDHHMM at the start of the incident ID
+        id_match = re.match(r'(\d{12})', first_word)
+        if id_match:
+            ts = id_match.group(1)  # e.g. '202607181131'
+            incident_time_str = ts
+            unique_id = first_word
+            try:
+                # The incident ID is generated by the backend in UTC
+                incident_time = datetime.strptime(ts, "%Y%m%d%H%M")
+                age_minutes = abs((datetime.utcnow() - incident_time).total_seconds() / 60)
+            except Exception:
+                age_minutes = 0
+        else:
+            unique_id = text[:60]
+    
+    return unique_id, age_minutes, incident_time_str
+
 # ── Thread 1: The Acknowledger (Tab 1) ──────────────────────────────────────
+def load_ack_tracker():
+    """Load the last seen incident timestamp from disk."""
+    if ACK_TRACKER_FILE.exists():
+        try:
+            data = json.loads(ACK_TRACKER_FILE.read_text())
+            return data.get("last_incident_time", None), data.get("acked_ids", [])
+        except Exception:
+            pass
+    return None, []
+
+def save_ack_tracker(last_time, recent_ids):
+    """Save the last seen incident timestamp and recent IDs to disk."""
+    try:
+        ACK_TRACKER_FILE.write_text(json.dumps({
+            "last_incident_time": last_time,
+            "acked_ids": list(recent_ids)[-200:],  # Keep last 200 IDs
+            "updated_at": datetime.now().isoformat()
+        }, indent=2))
+    except Exception:
+        pass
+
 async def ack_worker(page):
     """Constantly scans for unacknowledged incidents and silences them to protect SLAs."""
     console.print("[Tab 1] [cyan]Tab 1 (Siren Silencer) is online.[/cyan]")
+    last_heartbeat = 0
+    
+    # Load previous state from disk so we know where we left off
+    saved_time, saved_ids = load_ack_tracker()
+    if saved_time:
+        console.print(f"[Tab 1] [cyan]Resuming from last seen incident time: {saved_time}[/cyan]")
+    for sid in saved_ids:
+        acked_ids.add(sid)
+
+    async def inject_observer():
+        """Inject a MutationObserver into the page that signals us when the table changes."""
+        try:
+            await page.evaluate("""
+                () => {
+                    if (window.__incidentObserver) window.__incidentObserver.disconnect();
+                    window.__tableChanged = false;
+                    const target = document.querySelector('table tbody');
+                    if (!target) return;
+                    window.__incidentObserver = new MutationObserver(() => {
+                        window.__tableChanged = true;
+                    });
+                    window.__incidentObserver.observe(target, { childList: true, subtree: true, characterData: true });
+                }
+            """)
+        except Exception:
+            pass
+
+    async def table_has_changed():
+        """Check and reset the JS flag."""
+        try:
+            changed = await page.evaluate("() => { const v = window.__tableChanged; window.__tableChanged = false; return v; }")
+            return bool(changed)
+        except Exception:
+            return False
+
+    async def scan_and_ack():
+        """One fast scan of all visible rows. Returns True if any action was taken."""
+        nonlocal saved_time
+        rows_locator = page.locator('table tbody tr')
+        rows_count = await rows_locator.count()
+        if rows_count == 0:
+            return False
+
+        processed_any = False
+        newest_time = saved_time
+
+        for i in range(rows_count):
+            try:
+                r = rows_locator.nth(i)
+                if not await r.is_visible():
+                    continue
+                text = await r.inner_text()
+                text = text.strip()
+                if not text:
+                    continue
+                parts = text.split()
+                if not parts:
+                    continue
+                first = parts[0]
+
+                unique_id, age_minutes, incident_time_str = parse_incident_age(text, first)
+
+                if unique_id in acked_ids:
+                    continue
+
+                if incident_time_str:
+                    if newest_time is None or incident_time_str > newest_time:
+                        newest_time = incident_time_str
+
+                if re.search(r'(?i)acknowledged\s+by', text) or re.search(r'(?i)acknowledged|resolved|closed', text):
+                    acked_ids.add(unique_id)
+                    continue
+
+                if age_minutes >= 5:
+                    if metric_callback: metric_callback('ignored', 1)
+                    acked_ids.add(unique_id)
+                    continue
+
+                # NEW incident — click immediately!
+                await r.scroll_into_view_if_needed()
+                await r.click(force=True)
+                await asyncio.sleep(0.2)
+
+                ack_btn = page.locator('button:has-text("Acknowledge"), button:has-text("Assign to me")').locator('visible=true').last
+                if await ack_btn.is_visible(timeout=1200):
+                    console.print(f"[Tab 1] [green]⚡ '{first}' acknowledged![/green]")
+                    await ack_btn.click(force=True)
+                    await asyncio.sleep(0.15)
+                    if metric_callback: metric_callback('acked', 1)
+
+                acked_ids.add(unique_id)
+                await close_side_panel(page)
+                processed_any = True
+
+            except Exception as inner_e:
+                err_str = str(inner_e).lower()
+                if any(k in err_str for k in ("context was destroyed", "detached", "target closed", "not attached")):
+                    break
+                continue
+
+        if newest_time and newest_time != saved_time:
+            saved_time = newest_time
+            save_ack_tracker(saved_time, acked_ids)
+
+        return processed_any
+
+    # Inject the observer initially
+    await inject_observer()
+    last_reload = time.time()
+    RELOAD_INTERVAL = 5.0   # Hard-reload every 5 seconds (only when idle)
+
     while True:
         try:
-            rows = await get_incident_rows(page)
-            if not rows:
-                await asyncio.sleep(5)
-                continue
-                
-            processed_any = False
-            for r in rows:
+            now = time.time()
+
+            # Hard reload on interval to fetch fresh data from the server
+            if now - last_reload >= RELOAD_INTERVAL:
+                await page.reload(wait_until="domcontentloaded")
                 try:
-                    text = await r.inner_text()
-                    text = text.strip()
-                    if not text: continue
-                    
-                    parts = text.split()
-                    if not parts: continue
-                    first = parts[0]
-                    
-                    # Create a truly unique ID using the timestamp if available
-                    unique_id = first
-                    age_minutes = 0
-                    match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', text)
-                    if match:
-                        unique_id = f"{first}_{match.group(1)}"
-                        try:
-                            incident_time = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
-                            # Dashboard timestamps are in UTC. Compare against current UTC time to prevent timezone bugs!
-                            age_minutes = (datetime.utcnow() - incident_time).total_seconds() / 60
-                        except Exception:
-                            age_minutes = 0
-                    else:
-                        # Fallback to the first 60 chars of the row text if no timestamp
-                        unique_id = text[:60]
-                    
-                    if unique_id in acked_ids:
-                        continue
-                        
-                    if re.search(r'(?i)acknowledged\s+by', text):
-                        acked_ids.add(unique_id)
-                        continue
-                        
-                    # HUGE SPEEDUP 2: Check age BEFORE clicking!
-                    if age_minutes >= 5:
-                        console.print(f"[Tab 1] [red]Incident is {int(age_minutes)} minutes old (>= 5 mins)! Skipping Acknowledgment.[/red]")
-                        if metric_callback: metric_callback('ignored', 1)
-                        acked_ids.add(unique_id)
-                        continue
-                        
-                    # Click it
-                    await r.click(force=True)
-                    await asyncio.sleep(1.0) # Ensure side panel animation finishes
-                    
-                    is_unacknowledged = False
-                    ack_btn = page.locator('text=/^\\s*(Acknowledge|Assign to me)\\s*$/i').locator('visible=true').last
-                    if await ack_btn.is_visible(timeout=3000):
-                        is_unacknowledged = True
-                            
-                    if is_unacknowledged:
-                        console.print("[Tab 1] [yellow]Unacknowledged incident detected! Silencing SLA clock...[/yellow]")
-                        await ack_btn.click(force=True)
-                        await asyncio.sleep(0.1) # Instant acknowledgement, no waiting for slow UI banners!
-                        if metric_callback: metric_callback('acked', 1)
-                            
-                    # Add to acked_ids
-                    acked_ids.add(unique_id)
-                    await close_side_panel(page)
-                    processed_any = True
-                    
-                except Exception as inner_e:
-                    err_str = str(inner_e).lower()
-                    if "execution context was destroyed" in err_str or "detached" in err_str or "target closed" in err_str or "not attached" in err_str:
-                        break # Break inner loop, instantly fetch fresh rows
-                    else:
-                        raise # Bubble up to outer
-                        
-            if not processed_any:
-                # Force the dashboard to fetch new incidents if a Refresh button exists!
-                try:
-                    refresh_btn = page.locator('button:has-text("Refresh"), button[title*="Refresh"], .lucide-refresh-cw').locator('visible=true').first
-                    if await refresh_btn.is_visible(timeout=100):
-                        await refresh_btn.click(force=True)
+                    await page.locator('table tbody tr').first.wait_for(state="visible", timeout=5000)
                 except Exception:
                     pass
-                await asyncio.sleep(1.0) # Scan every 1 second
-                
+                await inject_observer()
+                last_reload = time.time()
+
+                if time.time() - last_heartbeat >= 60:
+                    console.print("[Tab 1] [dim]Siren Silencer is active...[/dim]")
+                    last_heartbeat = time.time()
+
+            # Always scan after reload
+            did_work = await scan_and_ack()
+            if did_work:
+                last_reload = time.time()  # Reset reload timer so we don't interrupt active work
+
+            # Also scan immediately if the observer detected a table change
+            if await table_has_changed():
+                did_work = await scan_and_ack()
+                if did_work:
+                    last_reload = time.time()
+
+            await asyncio.sleep(0.1)  # Tight loop — near-instant reaction
+
         except Exception as e:
-            if "execution context was destroyed" not in str(e).lower():
+            err = str(e).lower()
+            if "context was destroyed" not in err and "net::err_aborted" not in err:
                 console.print(f"[Tab 1 Error] {e}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(2.0)
+            last_reload = 0  # Force a reload on next iteration
 
 # ── Thread 2: The Filler (Tab 2) ────────────────────────────────────────────
 async def fill_worker(page):
     """Scans for acknowledged incidents and fills them, prompting user safely if unknown."""
     console.print("[Tab 2] [cyan]Tab 2 (Background Filler) is online.[/cyan]")
+    incident_failure_counts = {}
+    current_page = 1  # Track which page we are on
+    
     while True:
         try:
-            rows = await get_incident_rows(page)
-            if not rows:
+            rows_locator = page.locator('table tbody tr')
+            rows_count = await rows_locator.count()
+            if rows_count == 0:
                 await asyncio.sleep(5)
                 continue
                 
             processed_any = False
-            for r in rows:
+            consecutive_failures = 0
+            
+            for i in range(rows_count):
                 try:
+                    r = rows_locator.nth(i)
+                    if not await r.is_visible():
+                        continue
+                        
                     text = await r.inner_text()
                     text = text.strip()
                     if not text: continue
@@ -395,27 +568,68 @@ async def fill_worker(page):
                     if not parts: continue
                     first = parts[0]
                     
-                    unique_id = first
-                    match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', text)
-                    if match:
-                        unique_id = f"{first}_{match.group(1)}"
-                    else:
-                        unique_id = text[:60]
+                    # Parse age from incident ID or row text
+                    unique_id, age_minutes, _ = parse_incident_age(text, first)
                     
                     if unique_id in filled_ids or unique_id in temporarily_skipped_ids:
                         continue
                     
                     # Open modal
+                    await r.scroll_into_view_if_needed()
                     await r.click(force=True)
                     await asyncio.sleep(0.5)
+                    
+                    # Verify modal opened using the standard dialog role
+                    modal_indicator = page.locator('[role="dialog"], .fixed.inset-y-0.right-0, .lucide-x').locator('visible=true').first
+                    if not await modal_indicator.is_visible(timeout=3000):
+                        console.print(f"[Tab 2] [dim]Modal didn't seem to open for {first}, trying click again...[/dim]")
+                        try:
+                            await r.click(timeout=3000)
+                            await asyncio.sleep(1.0)
+                        except Exception as click_err:
+                            console.print(f"[Tab 2] [red]Row click failed: {click_err}[/red]")
+                            
+                        # If it STILL didn't open, handle the failure
+                        if not await modal_indicator.is_visible(timeout=3000):
+                            incident_failure_counts[unique_id] = incident_failure_counts.get(unique_id, 0) + 1
+                            if incident_failure_counts[unique_id] >= 2:
+                                console.print(f"[Tab 2] [red]Cannot open modal for '{first}' after multiple retries. Permanently skipping this broken incident.[/red]")
+                                filled_ids.add(unique_id)
+                                consecutive_failures = 0  # Reset — this one is just broken, not the dashboard
+                                continue
+                                
+                            consecutive_failures += 1
+                            console.print(f"[Tab 2] [dim]Skipping '{first}' for now. (Failure {consecutive_failures}/5)[/dim]")
+                            temporarily_skipped_ids.add(unique_id)
+                            
+                            if consecutive_failures >= 5:
+                                console.print("[Tab 2] [red]5 consecutive failures — Dashboard appears frozen! Reloading...[/red]")
+                                await page.reload(wait_until="domcontentloaded")
+                                try:
+                                    await page.locator('table tbody tr').first.wait_for(state="visible", timeout=8000)
+                                except Exception:
+                                    pass
+                                await asyncio.sleep(2)
+                                # Navigate BACK to the page we were on
+                                await goto_page(page, current_page)
+                                consecutive_failures = 0
+                                break  # Break inner loop to restart sweep from top
+                            continue
+                            
+                    # Reset failures on success
+                    consecutive_failures = 0
                 
+                    # The user explicitly requested the filler to never acknowledge incidents.
+                    # We will simply try to scrape/fill.
+                    
+                    # Scroll down to ensure fields are rendered if the dashboard uses lazy-loading!
+                    await page.keyboard.press('PageDown')
+                    await asyncio.sleep(0.5)
+                    
                     try:
-                        await page.locator('label:has-text("Priority"), :text("Priority")').last.wait_for(state="visible", timeout=8000)
+                        await page.locator('text="Root Cause Category"').last.wait_for(state="visible", timeout=2000)
                     except Exception:
                         pass
-                    
-                    # We no longer explicitly skip unacknowledged incidents. 
-                    # If the dashboard allows editing them without acknowledging, the bot will successfully fill them!
                         
                     scraped_data = await scrape_incident_data(page)
                     has_valid_data = False
@@ -489,6 +703,18 @@ async def fill_worker(page):
                                 console.print(f"[Tab 2] [dim]AI Prediction failed ({ai_error}). Falling back to Manual Queue.[/dim]")
                                 if log_callback: log_callback(f"[Tab 2] [red]AI Error: {ai_error}[/red]", "fill")
                                 
+                                # Send Windows Desktop Notification
+                                if notification:
+                                    try:
+                                        notification.notify(
+                                            title="Incident Bot Needs Help!",
+                                            message=f"Manual filling required for: {characteristic_key}",
+                                            app_name="Incident Bot",
+                                            timeout=5
+                                        )
+                                    except Exception:
+                                        pass
+                                
                                 if unknown_incident_callback:
                                     unknown_incident_callback(characteristic_key)
                                     
@@ -501,7 +727,6 @@ async def fill_worker(page):
                         console.print(f"[Tab 2] [cyan]Applying data for '{characteristic_key}'...[/cyan]")
                     
                         fill_data = {
-                            "priority": matched_data.get("priority", "Low"),
                             "rc_description": matched_data["rc_description"],
                             "rc_category": matched_data["rc_category"],
                             "rc_responsibility": matched_data["rc_responsibility"]
@@ -513,14 +738,13 @@ async def fill_worker(page):
                             if field_value and len(str(field_value)) > 2 and "required if" not in str(field_value).lower() and "alllowmediumhigh" not in str(field_value).lower():
                                 try:
                                     lbl_map = {
-                                        "priority": "Priority",
                                         "rc_description": "Root Cause Description",
                                         "rc_category": "Root Cause Category",
                                         "rc_responsibility": "Root Cause Responsibility"
                                     }
                                     lbl = lbl_map[field_key]
                                 
-                                    label_loc = page.locator(f'p:text-is("{lbl}"), span:text-is("{lbl}"), label:text-is("{lbl}"), p:has-text("{lbl}"), span:has-text("{lbl}")').locator('visible=true').last
+                                    label_loc = page.locator(f':text("{lbl}")').locator('visible=true').last
                                     if not await label_loc.is_visible(timeout=3000):
                                         console.print(f"  [Tab 2] [red]✗ Label '{lbl}' not found on screen[/red]")
                                         continue
@@ -637,9 +861,12 @@ async def fill_worker(page):
             if not processed_any:
                 temporarily_skipped_ids.clear()
                 moved_next = await paginate_or_refresh(page, "[Tab 2] ")
-                if not moved_next:
-                    console.print("[Tab 2] [dim]Queue exhausted. Resting for 30 seconds before next sweep...[/dim]")
-                    await asyncio.sleep(30)
+                if moved_next:
+                    current_page += 1
+                else:
+                    console.print("[Tab 2] [dim]Sweep complete. Looping back to Page 1...[/dim]")
+                    current_page = 1
+                    await asyncio.sleep(5)
         except Exception as e:
             if "Execution context was destroyed" not in str(e):
                 console.print(f"[Tab 2 Error] {e}")
