@@ -829,6 +829,7 @@ async def fill_worker(page):
                             "prioritystatus",
                             "select incident",
                             "still learning",
+                            "save",
                         ]
                         for v in scraped_data.values():
                             if any(term in str(v).lower() for term in invalid_terms):
@@ -872,6 +873,19 @@ async def fill_worker(page):
                             console.print(
                                 f"\n[Tab 2] [bold yellow]⚠ UNKNOWN INCIDENT DETECTED:[/bold yellow] [cyan]'{characteristic_key}'[/cyan]"
                             )
+
+                            # ALWAYS send Windows Desktop Notification for unknown incidents
+                            if notification:
+                                try:
+                                    notification.notify(
+                                        title="⚠ Unknown Incident Detected!",
+                                        message=f"New incident needs attention: {characteristic_key}",
+                                        app_name="Siren Bot",
+                                        timeout=10,
+                                    )
+                                except Exception:
+                                    pass
+
                             console.print(
                                 f"[Tab 2] [dim]Querying OpenRouter AI for '{characteristic_key}'...[/dim]"
                             )
@@ -905,7 +919,7 @@ async def fill_worker(page):
                                 )
                             else:
                                 console.print(
-                                    f"[Tab 2] [dim]AI Prediction failed ({ai_error}). Falling back to Manual Queue.[/dim]"
+                                    f"[Tab 2] [red]AI also failed ({ai_error}). Manual filling required![/red]"
                                 )
                                 if log_callback:
                                     log_callback(
@@ -913,14 +927,14 @@ async def fill_worker(page):
                                         "fill",
                                     )
 
-                                # Send Windows Desktop Notification
+                                # Send a second, more urgent notification since AI also failed
                                 if notification:
                                     try:
                                         notification.notify(
-                                            title="Incident Bot Needs Help!",
-                                            message=f"Manual filling required for: {characteristic_key}",
-                                            app_name="Incident Bot",
-                                            timeout=5,
+                                            title="❌ Manual Filling Required!",
+                                            message=f"AI failed for: {characteristic_key}. Please fill manually.",
+                                            app_name="Siren Bot",
+                                            timeout=15,
                                         )
                                     except Exception:
                                         pass
@@ -933,15 +947,41 @@ async def fill_worker(page):
                                 await close_side_panel(page)
                                 continue
 
-                        # Start filling
+                        # Start filling — use .get() to safely handle incomplete memory data
+                        rc_desc = matched_data.get("rc_description", "")
+                        rc_cat = matched_data.get("rc_category", "")
+                        rc_resp = matched_data.get("rc_responsibility", "")
+
+                        # Validate: if ALL three fields are empty/missing, the data is useless
+                        if not any(v and len(str(v).strip()) > 2 for v in [rc_desc, rc_cat, rc_resp]):
+                            console.print(
+                                f"[Tab 2] [yellow]⚠ Memory for '{characteristic_key}' has no usable RC data. Skipping.[/yellow]"
+                            )
+                            # Notify user that this incident needs manual attention
+                            if notification:
+                                try:
+                                    notification.notify(
+                                        title="⚠ Incomplete Incident Data!",
+                                        message=f"No RC data for: {characteristic_key}. Please fill manually.",
+                                        app_name="Siren Bot",
+                                        timeout=10,
+                                    )
+                                except Exception:
+                                    pass
+                            if unknown_incident_callback:
+                                unknown_incident_callback(characteristic_key)
+                            temporarily_skipped_ids.add(unique_id)
+                            await close_side_panel(page)
+                            continue
+
                         console.print(
                             f"[Tab 2] [cyan]Applying data for '{characteristic_key}'...[/cyan]"
                         )
 
                         fill_data = {
-                            "rc_description": matched_data["rc_description"],
-                            "rc_category": matched_data["rc_category"],
-                            "rc_responsibility": matched_data["rc_responsibility"],
+                            "rc_description": rc_desc,
+                            "rc_category": rc_cat,
+                            "rc_responsibility": rc_resp,
                         }
 
                         fields_successfully_filled = 0
@@ -1156,7 +1196,18 @@ async def fill_worker(page):
                     ):
                         break  # Break inner loop, instantly fetch fresh rows
                     else:
-                        raise  # Bubble up to outer
+                        # Data errors (KeyError, ValueError, etc.) — skip this incident
+                        # instead of retrying forever in an infinite loop
+                        console.print(
+                            f"[Tab 2] [red]Error processing incident: {str(inner_e)[:120]}. Skipping.[/red]"
+                        )
+                        if unique_id:
+                            temporarily_skipped_ids.add(unique_id)
+                        try:
+                            await close_side_panel(page)
+                        except Exception:
+                            pass
+                        continue
 
             if not processed_any:
                 temporarily_skipped_ids.clear()
