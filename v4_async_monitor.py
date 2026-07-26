@@ -466,9 +466,15 @@ async def ack_worker(page):
                     continue
 
                 # NEW incident — click immediately!
-                await r.scroll_into_view_if_needed()
-                await r.click(force=True)
-                await asyncio.sleep(0.2)
+                link = r.locator('td').nth(1).locator('span').first
+                try:
+                    await link.evaluate("el => el.scrollIntoView({block: 'center'})")
+                    await asyncio.sleep(0.2)
+                    await link.click(timeout=5000, force=True)
+                except Exception:
+                    await r.scroll_into_view_if_needed()
+                    await r.click(force=True)
+                await asyncio.sleep(0.5)
 
                 ack_btn = page.locator('button:has-text("Acknowledge"), button:has-text("Assign to me")').locator('visible=true').last
                 if await ack_btn.is_visible(timeout=1200):
@@ -575,22 +581,28 @@ async def fill_worker(page):
                         continue
                     
                     # Open modal
-                    await r.scroll_into_view_if_needed()
-                    await r.click(force=True)
+                    link = r.locator('td').nth(1).locator('span').first
+                    try:
+                        await link.evaluate("el => el.scrollIntoView({block: 'center'})")
+                        await asyncio.sleep(0.2)
+                        await link.click(timeout=5000, force=True)
+                    except Exception:
+                        await r.scroll_into_view_if_needed()
+                        await r.click(force=True)
                     await asyncio.sleep(0.5)
                     
                     # Verify modal opened using the standard dialog role
                     modal_indicator = page.locator('[role="dialog"], .fixed.inset-y-0.right-0, .lucide-x').locator('visible=true').first
-                    if not await modal_indicator.is_visible(timeout=3000):
+                    if not await modal_indicator.is_visible(timeout=25000):
                         console.print(f"[Tab 2] [dim]Modal didn't seem to open for {first}, trying click again...[/dim]")
                         try:
-                            await r.click(timeout=3000)
+                            await link.click(timeout=5000, force=True)
                             await asyncio.sleep(1.0)
                         except Exception as click_err:
                             console.print(f"[Tab 2] [red]Row click failed: {click_err}[/red]")
                             
                         # If it STILL didn't open, handle the failure
-                        if not await modal_indicator.is_visible(timeout=3000):
+                        if not await modal_indicator.is_visible(timeout=25000):
                             incident_failure_counts[unique_id] = incident_failure_counts.get(unique_id, 0) + 1
                             if incident_failure_counts[unique_id] >= 2:
                                 console.print(f"[Tab 2] [red]Cannot open modal for '{first}' after multiple retries. Permanently skipping this broken incident.[/red]")
