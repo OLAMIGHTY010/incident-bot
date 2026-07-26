@@ -507,7 +507,10 @@ async def ack_worker(page):
             return False
 
     async def scan_and_ack():
-        """One fast scan of all visible rows. Returns True if any action was taken."""
+        """Scan rows top-to-bottom (newest first). Acknowledge each new incident
+        and STOP as soon as we hit one we already acknowledged previously.
+        This guarantees every incident between the newest and the last-acked
+        one is processed with zero gaps."""
         nonlocal saved_time
         rows_locator = page.locator("table tbody tr")
         rows_count = await rows_locator.count()
@@ -535,26 +538,41 @@ async def ack_worker(page):
                     text, first
                 )
 
+                # ── STOP CONDITION ──────────────────────────────────────
+                # If we reach an incident we already acknowledged before,
+                # everything below it was handled in a previous cycle.
+                # Stop here — no need to keep scanning further down.
                 if unique_id in acked_ids:
-                    continue
+                    console.print(
+                        f"[Tab 1] [dim]Reached already-acked '{first}' — stopping scan.[/dim]"
+                    )
+                    break
 
                 if incident_time_str:
                     if newest_time is None or incident_time_str > newest_time:
                         newest_time = incident_time_str
 
+                # Already resolved/acknowledged by someone else — mark and continue
+                # (don't break, because another user may have acked this one
+                #  but there could still be newer un-acked ones above it
+                #  that were inserted between cycles)
                 if re.search(r"(?i)acknowledged\s+by", text) or re.search(
                     r"(?i)acknowledged|resolved|closed", text
                 ):
                     acked_ids.add(unique_id)
                     continue
 
+                # Very old incident (≥5 min) — skip clicking but mark as seen
                 if age_minutes >= 5:
                     if metric_callback:
                         metric_callback("ignored", 1)
                     acked_ids.add(unique_id)
+                    console.print(
+                        f"[Tab 1] [yellow]Skipped old incident '{first}' ({age_minutes:.0f}m old)[/yellow]"
+                    )
                     continue
 
-                # NEW incident — click immediately!
+                # ── NEW INCIDENT — click and acknowledge immediately! ──
                 link = r.locator("td").nth(1).locator("span").first
                 try:
                     await link.evaluate("el => el.scrollIntoView({block: 'center'})")
